@@ -7,4 +7,3 @@ xgboost>=2.0.0
 tensorflow-cpu==2.15.0
 sentence-transformers>=2.7.0
 transformers>=4.40.0
-anthropic>=0.28.0
