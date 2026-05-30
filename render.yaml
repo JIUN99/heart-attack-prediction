@@ -3,8 +3,5 @@ services:
     name: heart-attack-prediction
     runtime: python
     buildCommand: "pip install -r requirements.txt && python train_model.py"
-    startCommand: "gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120"
-    envVars:
-      - key: HF_TOKEN
-        sync: false        # set manually in Render dashboard
-    plan: standard         # needs >=2 GB RAM for embedding models
+    startCommand: "gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120 --preload"
+    plan: free
