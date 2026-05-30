@@ -4,7 +4,7 @@ numpy>=1.26.0
 pandas>=2.2.0
 scikit-learn>=1.4.0
 xgboost>=2.0.0
-tensorflow>=2.15.0
+tensorflow-cpu==2.15.0
 sentence-transformers>=2.7.0
 transformers>=4.40.0
 torch>=2.2.0
