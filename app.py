@@ -2,61 +2,85 @@
 app.py
 Heart Attack Prediction — GenAI Chatbot Interface
 Deployed on Render as a web service.
+
+FIX: All heavy models are lazy-loaded on first request so Flask binds
+     to its port immediately and Render doesn't time out.
 """
 
 import os
 import re
+import json
 import pickle
+import threading
 import numpy as np
 import anthropic
 from flask import Flask, request, jsonify, render_template_string
-from tensorflow.keras.models import load_model
-from sentence_transformers import SentenceTransformer
-from transformers import pipeline
-
-# ─────────────────────────────────────────────────────────────────────────────
-# App & model loading
-# ─────────────────────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Lazy-loaded globals  (None until first /chat request)
+# ─────────────────────────────────────────────────────────────────────────────
+_lock         = threading.Lock()
+_models_ready = False
+
+_nn_model      = None
+_scaler        = None
+_le_map        = None
+_feature_names = None
+_emb_model     = None
+_sent_pipe     = None
+_anthropic     = None
+
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "model")
 
-print("Loading ML artifacts …")
-nn_model      = load_model(os.path.join(MODEL_DIR, "transformer_nn.keras"))
-scaler        = pickle.load(open(os.path.join(MODEL_DIR, "scaler.pkl"), "rb"))
-le_map        = pickle.load(open(os.path.join(MODEL_DIR, "label_encoders.pkl"), "rb"))
-feature_names = pickle.load(open(os.path.join(MODEL_DIR, "feature_names.pkl"), "rb"))
 
-print("Loading sentence embeddings model …")
-emb_model = SentenceTransformer("all-MiniLM-L6-v2")
+def _load_models():
+    """Load all heavy artifacts once, thread-safely."""
+    global _models_ready, _nn_model, _scaler, _le_map
+    global _feature_names, _emb_model, _sent_pipe, _anthropic
 
-print("Loading sentiment model …")
-sent_pipe = pipeline("sentiment-analysis",
-                     model="distilbert-base-uncased-finetuned-sst-2-english",
-                     truncation=True, max_length=512)
+    with _lock:
+        if _models_ready:
+            return  # another thread already loaded
 
-# Anthropic client (uses ANTHROPIC_API_KEY env var automatically)
-anthropic_client = anthropic.Anthropic()
+        print("[startup] Loading ML artifacts …")
+        from tensorflow.keras.models import load_model
+        _nn_model      = load_model(os.path.join(MODEL_DIR, "transformer_nn.keras"))
+        _scaler        = pickle.load(open(os.path.join(MODEL_DIR, "scaler.pkl"), "rb"))
+        _le_map        = pickle.load(open(os.path.join(MODEL_DIR, "label_encoders.pkl"), "rb"))
+        _feature_names = pickle.load(open(os.path.join(MODEL_DIR, "feature_names.pkl"), "rb"))
+
+        print("[startup] Loading sentence embeddings model …")
+        from sentence_transformers import SentenceTransformer
+        _emb_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+        print("[startup] Loading sentiment model …")
+        from transformers import pipeline as hf_pipeline
+        _sent_pipe = hf_pipeline(
+            "sentiment-analysis",
+            model="distilbert-base-uncased-finetuned-sst-2-english",
+            truncation=True, max_length=512,
+        )
+
+        print("[startup] Connecting Anthropic client …")
+        _anthropic = anthropic.Anthropic()
+
+        _models_ready = True
+        print("[startup] ✅ All models ready.")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Feature extraction helpers
+# Feature helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 CATEGORICAL_DEFAULTS = {
-    "Gender": "Male",
-    "Exercise_Habits": "Medium",
-    "Smoking": "No",
-    "Alcohol_Consumption": "Low",
-    "Sugar_Consumption": "Medium",
-    "Stress_Level": "Medium",
-    "Family_Heart_Disease": "No",
-    "High_Blood_Pressure": "No",
-    "Diabetes": "No",
-    "Low_HDL": "No",
-    "High_LDL": "No",
+    "Gender": "Male", "Exercise_Habits": "Medium", "Smoking": "No",
+    "Alcohol_Consumption": "Low", "Sugar_Consumption": "Medium",
+    "Stress_Level": "Medium", "Family_Heart_Disease": "No",
+    "High_Blood_Pressure": "No", "Diabetes": "No",
+    "Low_HDL": "No", "High_LDL": "No",
 }
-
 NUMERIC_DEFAULTS = {
     "Age": 50, "BMI": 25.0, "Blood_Pressure": 120.0,
     "Cholesterol_Level": 200.0, "Triglyceride_Level": 150,
@@ -64,9 +88,10 @@ NUMERIC_DEFAULTS = {
     "Homocysteine_Level": 10.0, "Sleep_Hours": 7,
 }
 
-def encode_categoricals(values: dict) -> dict:
+
+def _encode_categoricals(values: dict) -> dict:
     encoded = {}
-    for col, le in le_map.items():
+    for col, le in _le_map.items():
         if col == "Heart_Disease_Status":
             continue
         val = values.get(col, CATEGORICAL_DEFAULTS.get(col, le.classes_[0]))
@@ -76,40 +101,31 @@ def encode_categoricals(values: dict) -> dict:
     return encoded
 
 
-def build_feature_vector(patient_info: dict, free_text: str) -> np.ndarray:
-    """Build the exact feature vector expected by the model."""
-    # 1. Embeddings from free-text description
-    embedding = emb_model.encode([free_text])[0]          # shape (384,)
+def _build_feature_vector(patient_info: dict, free_text: str) -> np.ndarray:
+    embedding       = _emb_model.encode([free_text])[0]
+    sentiment_score = _sent_pipe(free_text[:512])[0]["score"]
+    cat_encoded     = _encode_categoricals(patient_info)
+    num_values      = {k: patient_info.get(k, v) for k, v in NUMERIC_DEFAULTS.items()}
 
-    # 2. Sentiment score
-    sentiment_score = sent_pipe(free_text[:512])[0]["score"]
-
-    # 3. Tabular features
-    cat_encoded = encode_categoricals(patient_info)
-    num_values  = {k: patient_info.get(k, v) for k, v in NUMERIC_DEFAULTS.items()}
-
-    # Assemble in the order stored in feature_names
     row = {}
     row.update(num_values)
     row.update(cat_encoded)
     for i, v in enumerate(embedding):
-        row[f"emb_{i}"] = v
+        row[f"embedding_{i}"] = v
     row["Sentiment_Score"] = sentiment_score
 
-    vec = np.array([row.get(f, 0.0) for f in feature_names], dtype=np.float32)
-    return vec
+    return np.array([row.get(f, 0.0) for f in _feature_names], dtype=np.float32)
 
 
-def predict_risk(patient_info: dict, free_text: str) -> dict:
-    vec = build_feature_vector(patient_info, free_text)
-    vec_s = scaler.transform(vec.reshape(1, -1))
-    prob  = float(nn_model.predict(vec_s, verbose=0)[0][0])
-    label = "High Risk" if prob > 0.5 else "Low Risk"
-    return {"probability": round(prob, 4), "label": label}
+def _predict_risk(patient_info: dict, free_text: str) -> dict:
+    vec   = _build_feature_vector(patient_info, free_text)
+    vec_s = _scaler.transform(vec.reshape(1, -1))
+    prob  = float(_nn_model.predict(vec_s, verbose=0)[0][0])
+    return {"probability": round(prob, 4), "label": "High Risk" if prob > 0.5 else "Low Risk"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Claude-powered GenAI layer
+# Claude GenAI layer
 # ─────────────────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are a compassionate cardiac health assistant.
@@ -135,7 +151,6 @@ Your job is to:
     "Diabetes": "No",
     "Low_HDL": "No",
     "High_LDL": "Yes",
-    "Gender": "Male",
     "Exercise_Habits": "Low",
     "Smoking": "Yes",
     "Alcohol_Consumption": "Medium",
@@ -150,18 +165,19 @@ Your job is to:
 4. After the prediction result is returned to you, explain it clearly, mention key risk factors, and give lifestyle advice. Always remind the user you are NOT a substitute for a real doctor.
 Keep responses warm, clear, and concise. Never use medical jargon without explaining it."""
 
-def chat_with_claude(conversation_history: list, user_message: str,
-                     prediction_result: dict | None = None) -> str:
-    messages = list(conversation_history)
-    content = user_message
-    if prediction_result is not None:
-        content += (f"\n\n[SYSTEM: The ML model returned: "
-                    f"probability={prediction_result['probability']}, "
-                    f"label={prediction_result['label']}. "
-                    f"Please explain this result to the patient.]")
-    messages.append({"role": "user", "content": content})
 
-    response = anthropic_client.messages.create(
+def _chat_with_claude(history: list, user_message: str, prediction_result=None) -> str:
+    messages = list(history)
+    content  = user_message
+    if prediction_result:
+        content += (
+            f"\n\n[SYSTEM: The ML model returned: "
+            f"probability={prediction_result['probability']}, "
+            f"label={prediction_result['label']}. "
+            f"Please explain this result to the patient.]"
+        )
+    messages.append({"role": "user", "content": content})
+    response = _anthropic.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=1024,
         system=SYSTEM_PROMPT,
@@ -170,8 +186,7 @@ def chat_with_claude(conversation_history: list, user_message: str,
     return response.content[0].text
 
 
-def extract_predict_block(text: str) -> dict | None:
-    import json
+def _extract_predict_block(text: str):
     match = re.search(r"<PREDICT>(.*?)</PREDICT>", text, re.DOTALL)
     if not match:
         return None
@@ -190,37 +205,41 @@ def index():
     return render_template_string(HTML_UI)
 
 
+@app.route("/health")
+def health():
+    """Render health-check endpoint — also warms up the models."""
+    return jsonify({"status": "ok", "models_ready": _models_ready})
+
+
 @app.route("/chat", methods=["POST"])
 def chat():
+    _load_models()   # no-op after first call
+
     data    = request.get_json(force=True)
-    history = data.get("history", [])   # list of {role, content}
+    history = data.get("history", [])
     message = data.get("message", "")
 
-    # 1. Ask Claude
-    assistant_reply = chat_with_claude(history, message)
+    assistant_reply = _chat_with_claude(history, message)
 
-    # 2. Check if Claude wants a prediction
-    predict_data = extract_predict_block(assistant_reply)
+    predict_data = _extract_predict_block(assistant_reply)
     prediction   = None
     if predict_data:
-        prediction     = predict_risk(predict_data["patient_info"],
-                                      predict_data.get("free_text", message))
-        # Strip the <PREDICT> block and let Claude explain
+        prediction  = _predict_risk(
+            predict_data["patient_info"],
+            predict_data.get("free_text", message),
+        )
         clean_reply = re.sub(r"<PREDICT>.*?</PREDICT>", "", assistant_reply, flags=re.DOTALL).strip()
         history_for_explain = list(history) + [
-            {"role": "user",     "content": message},
-            {"role": "assistant","content": clean_reply},
+            {"role": "user",      "content": message},
+            {"role": "assistant", "content": clean_reply},
         ]
-        assistant_reply = chat_with_claude(history_for_explain, "", prediction_result=prediction)
+        assistant_reply = _chat_with_claude(history_for_explain, "", prediction_result=prediction)
 
-    return jsonify({
-        "reply":      assistant_reply,
-        "prediction": prediction,
-    })
+    return jsonify({"reply": assistant_reply, "prediction": prediction})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Minimal chat UI (single-file, no external assets needed)
+# Chat UI
 # ─────────────────────────────────────────────────────────────────────────────
 
 HTML_UI = """<!DOCTYPE html>
@@ -258,6 +277,8 @@ HTML_UI = """<!DOCTYPE html>
           padding: .6rem 1.4rem; cursor: pointer; font-weight: 600; }
   #send:hover { background: #a93226; }
   .typing { color: #999; font-style: italic; font-size: .85rem; }
+  #loading-banner { background: #fff3cd; color: #856404; text-align: center;
+                    padding: .5rem; font-size: .85rem; display: none; }
 </style>
 </head>
 <body>
@@ -270,6 +291,7 @@ HTML_UI = """<!DOCTYPE html>
   </svg>
   <h1>Heart Attack Risk Assessment — AI Chatbot</h1>
 </header>
+<div id="loading-banner">⏳ Loading AI models on first use — this may take 30–60 seconds…</div>
 <div id="chat">
   <div class="bubble bot">👋 Hi! I'm your cardiac health assistant powered by AI.
 I'll ask you a few questions about your health and lifestyle to assess your heart attack risk.
@@ -281,10 +303,12 @@ Let's start — how old are you, and what is your gender?</div>
   <button id="send">Send</button>
 </div>
 <script>
-const chatEl = document.getElementById('chat');
-const inputEl = document.getElementById('input');
-const sendEl  = document.getElementById('send');
+const chatEl   = document.getElementById('chat');
+const inputEl  = document.getElementById('input');
+const sendEl   = document.getElementById('send');
+const bannerEl = document.getElementById('loading-banner');
 let history = [];
+let firstMessage = true;
 
 function addBubble(text, role, prediction) {
   const d = document.createElement('div');
@@ -308,6 +332,11 @@ async function sendMessage() {
   addBubble(msg, 'user');
   history.push({role: 'user', content: msg});
 
+  if (firstMessage) {
+    bannerEl.style.display = 'block';
+    firstMessage = false;
+  }
+
   const typing = document.createElement('div');
   typing.className = 'bubble bot typing';
   typing.textContent = 'Thinking…';
@@ -322,10 +351,12 @@ async function sendMessage() {
     });
     const data = await res.json();
     chatEl.removeChild(typing);
+    bannerEl.style.display = 'none';
     addBubble(data.reply, 'bot', data.prediction);
     history.push({role: 'assistant', content: data.reply});
   } catch(e) {
     chatEl.removeChild(typing);
+    bannerEl.style.display = 'none';
     addBubble('Sorry, something went wrong. Please try again.', 'bot');
   }
 }
