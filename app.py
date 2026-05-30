@@ -166,13 +166,37 @@ def health():
 @app.route("/predict", methods=["POST"])
 def predict():
     if not _ready:
-        return jsonify({"error":"Models still loading, please retry in a few seconds"}), 503
-    data = request.get_json(force=True)
-    for k in NUMERIC_DEFAULTS:
-        if k in data:
-            try: data[k] = float(data[k])
-            except: data[k] = NUMERIC_DEFAULTS[k]
-    return jsonify(_predict(data))
+        return jsonify({"error": "Models still loading, please retry in 10-30 seconds"}), 503
+    try:
+        data = request.get_json(force=True) or {}
+        for k in NUMERIC_DEFAULTS:
+            if k in data:
+                try:    data[k] = float(data[k])
+                except: data[k] = NUMERIC_DEFAULTS[k]
+        return jsonify(_predict(data))
+    except Exception as e:
+        import traceback
+        err = traceback.format_exc()
+        print(f"[predict ERROR]\n{err}", flush=True)
+        return jsonify({"error": str(e), "traceback": err}), 500
+
+
+@app.route("/debug")
+def debug():
+    """Visit /debug in your browser to see model status and feature names."""
+    try:
+        return jsonify({
+            "ready":           _ready,
+            "model_loaded":    _nn_model is not None,
+            "scaler_loaded":   _scaler   is not None,
+            "le_map_loaded":   _le_map   is not None,
+            "feature_count":   len(_feature_names) if _feature_names else 0,
+            "feature_names":   _feature_names or [],
+            "model_dir":       MODEL_DIR,
+            "model_dir_files": os.listdir(MODEL_DIR) if os.path.exists(MODEL_DIR) else "NOT FOUND",
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # ── UI (same questionnaire, adds ms timing badge on result) ──────────────────
 
@@ -378,13 +402,19 @@ async function submitForm(){
   document.getElementById('result').style.display='none';
   try{
     const r=await fetch('/predict',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
-    if(r.status===503){
-      const e=await r.json();
-      alert(e.error||'Models still loading — please retry in a few seconds.');
+    const d=await r.json().catch(()=>null);
+    if(!d){
       document.getElementById('loading').style.display='none';
-      btn.disabled=false; return;
+      btn.disabled=false;
+      alert('Server returned an empty response.\nThis usually means the model is still loading.\nWait 20-30 seconds and try again, or visit /health to check status.');
+      return;
     }
-    const d=await r.json();
+    if(r.status===503||d.error){
+      document.getElementById('loading').style.display='none';
+      btn.disabled=false;
+      alert('Error: '+(d.error||'Unknown error')+'\n\n'+(d.traceback?d.traceback.split('\n').slice(-4).join('\n'):''));
+      return;
+    }
     document.getElementById('loading').style.display='none';
     btn.disabled=false;
     const isHigh=d.label==='High Risk';
@@ -410,8 +440,11 @@ async function submitForm(){
 </body>
 </html>"""
 
-# ── Load at import time so gunicorn --preload shares one loaded model ─────────
-load_models()
+# ── Start background loader — Flask binds port instantly, models load behind ──
+# Render scans for an open port within ~5s of startup. By loading models in a
+# background thread, gunicorn binds 0.0.0.0:$PORT immediately and Render is
+# happy. The /predict route returns 503 until _ready=True (usually <30s).
+threading.Thread(target=load_models, daemon=True).start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
