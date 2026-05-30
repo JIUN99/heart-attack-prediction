@@ -275,6 +275,9 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
   <p>Clinical-grade heart attack risk assessment — Transformer Neural Network</p>
   <span class="speed-badge">⚡ Optimised for fast prediction</span>
 </div>
+<div id="warm-banner" style="display:none;background:#fff3cd;color:#856404;text-align:center;padding:10px 16px;font-size:.88rem;border-bottom:1px solid #ffc107;">
+  ⏳ <span>AI model warming up...</span> &nbsp;The predict button will unlock automatically.
+</div>
 <div class="container">
 
   <div class="card">
@@ -361,6 +364,30 @@ function updateSlider(el){
   el.style.setProperty('--pct',((val-min)/(max-min)*100).toFixed(1)+'%');
 }
 document.querySelectorAll('input[type=range]').forEach(updateSlider);
+
+// On page load — poll /health and show banner until model is ready
+(async function(){
+  const banner = document.getElementById('warm-banner');
+  const btn    = document.getElementById('predictBtn');
+  let ready = await checkReady();
+  if(!ready){
+    banner.style.display='block';
+    btn.disabled=true;
+    btn.textContent='Loading AI model...';
+    let secs=0;
+    const iv=setInterval(async()=>{
+      secs+=2;
+      banner.querySelector('span').textContent='AI model warming up... '+secs+'s';
+      ready=await checkReady();
+      if(ready){
+        clearInterval(iv);
+        banner.style.display='none';
+        btn.disabled=false;
+        btn.textContent='Predict My Heart Attack Risk';
+      }
+    },2000);
+  }
+})();
 document.querySelectorAll('.pill-group').forEach(g=>{
   g.querySelectorAll('.pill').forEach(p=>{
     p.addEventListener('click',()=>{
@@ -373,6 +400,31 @@ function getPill(f){
   const g=document.querySelector(`.pill-group[data-field="${f}"]`);
   return g?g.querySelector('.pill.active')?.dataset.val:null;
 }
+async function checkReady(){
+  try{
+    const r=await fetch('/health');
+    const d=await r.json();
+    return d.ready===true;
+  }catch(e){ return false; }
+}
+
+async function waitForReady(maxWait=60){
+  const btn=document.getElementById('predictBtn');
+  const loadEl=document.getElementById('loading');
+  const loadMsg=document.querySelector('#loading p');
+  loadEl.style.display='block';
+  btn.disabled=true;
+  const start=Date.now();
+  while((Date.now()-start)<maxWait*1000){
+    const ready=await checkReady();
+    if(ready) return true;
+    const secs=Math.round((Date.now()-start)/1000);
+    loadMsg.textContent='AI model loading... '+secs+'s (first load takes ~30s)';
+    await new Promise(r=>setTimeout(r,2000));
+  }
+  return false;
+}
+
 async function submitForm(){
   const btn=document.getElementById('predictBtn');
   const data={
@@ -403,16 +455,27 @@ async function submitForm(){
   try{
     const r=await fetch('/predict',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
     const d=await r.json().catch(()=>null);
-    if(!d){
+    if(r.status===503||!d||d.error==='Models still loading, please retry in 10-30 seconds'){
+      // Model not ready — wait and auto-retry
       document.getElementById('loading').style.display='none';
       btn.disabled=false;
-      alert('Server returned an empty response.\nThis usually means the model is still loading.\nWait 20-30 seconds and try again, or visit /health to check status.');
+      const ready=await waitForReady(60);
+      if(!ready){
+        document.getElementById('loading').style.display='none';
+        btn.disabled=false;
+        alert('Model took too long to load. Please refresh the page and try again.');
+        return;
+      }
+      // Ready now — resubmit automatically
+      document.getElementById('loading').style.display='none';
+      btn.disabled=false;
+      submitForm();
       return;
     }
-    if(r.status===503||d.error){
+    if(!d||d.error){
       document.getElementById('loading').style.display='none';
       btn.disabled=false;
-      alert('Error: '+(d.error||'Unknown error')+'\n\n'+(d.traceback?d.traceback.split('\n').slice(-4).join('\n'):''));
+      alert('Error: '+(d?.error||'Unknown error')+'\n\n'+(d?.traceback?d.traceback.split('\n').slice(-4).join('\n'):''));
       return;
     }
     document.getElementById('loading').style.display='none';
