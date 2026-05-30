@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: heart-attack-prediction
+    runtime: python
+    buildCommand: "pip install -r requirements.txt && python train_model.py"
+    startCommand: "gunicorn app:app --workers 1 --timeout 120"
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false        # set this manually in Render dashboard
+    plan: standard         # needs ≥2 GB RAM for embedding models
