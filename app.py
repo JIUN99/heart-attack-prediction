@@ -25,6 +25,7 @@ _scaler       = None
 _le_map       = None
 _feature_names= None
 _ready        = False
+_load_error   = None
 
 CATEGORICAL_DEFAULTS = {
     "Gender":"Male","Exercise_Habits":"Medium","Smoking":"No",
@@ -40,26 +41,41 @@ NUMERIC_DEFAULTS = {
 
 # ── Startup loader (called once by gunicorn --preload) ────────────────────────
 def load_models():
-    global _nn_model, _scaler, _le_map, _feature_names, _ready
+    global _nn_model, _scaler, _le_map, _feature_names, _ready, _load_error
     t0 = time.time()
-    print("[startup] Loading Keras model ...", flush=True)
+    try:
+        os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+        os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
-    # Suppress TF noise
-    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
-    os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+        print("[startup] Importing TensorFlow ...", flush=True)
+        from tensorflow.keras.models import load_model
 
-    from tensorflow.keras.models import load_model
-    _nn_model      = load_model(os.path.join(MODEL_DIR, "transformer_nn.keras"))
-    _scaler        = pickle.load(open(os.path.join(MODEL_DIR, "scaler.pkl"),        "rb"))
-    _le_map        = pickle.load(open(os.path.join(MODEL_DIR, "label_encoders.pkl"),"rb"))
-    _feature_names = pickle.load(open(os.path.join(MODEL_DIR, "feature_names.pkl"), "rb"))
+        print("[startup] Loading transformer_nn.keras ...", flush=True)
+        _nn_model = load_model(os.path.join(MODEL_DIR, "transformer_nn.keras"))
 
-    # Warm-up: run one dummy prediction so TF compiles the graph now
-    dummy = np.zeros((1, len(_feature_names)), dtype=np.float32)
-    _nn_model.predict(dummy, verbose=0)
+        print("[startup] Loading scaler.pkl ...", flush=True)
+        with open(os.path.join(MODEL_DIR, "scaler.pkl"), "rb") as f:
+            _scaler = pickle.load(f)
 
-    _ready = True
-    print(f"[startup] Ready in {time.time()-t0:.1f}s", flush=True)
+        print("[startup] Loading label_encoders.pkl ...", flush=True)
+        with open(os.path.join(MODEL_DIR, "label_encoders.pkl"), "rb") as f:
+            _le_map = pickle.load(f)
+
+        print("[startup] Loading feature_names.pkl ...", flush=True)
+        with open(os.path.join(MODEL_DIR, "feature_names.pkl"), "rb") as f:
+            _feature_names = pickle.load(f)
+
+        print(f"[startup] {len(_feature_names)} features loaded. Running warm-up ...", flush=True)
+        dummy = np.zeros((1, len(_feature_names)), dtype=np.float32)
+        _nn_model.predict(dummy, verbose=0)
+
+        _ready = True
+        print(f"[startup] ✅ Ready in {time.time()-t0:.1f}s", flush=True)
+
+    except Exception as e:
+        import traceback
+        _load_error = traceback.format_exc()
+        print(f"[startup] ❌ LOAD FAILED:\n{_load_error}", flush=True)
 
 # ── Fast feature builder — replaces sentence-transformers + distilbert ────────
 # Strategy: map the 384 embedding dims + Sentiment_Score using
@@ -187,16 +203,30 @@ def debug():
     try:
         return jsonify({
             "ready":           _ready,
+            "load_error":      _load_error,
             "model_loaded":    _nn_model is not None,
             "scaler_loaded":   _scaler   is not None,
             "le_map_loaded":   _le_map   is not None,
             "feature_count":   len(_feature_names) if _feature_names else 0,
-            "feature_names":   _feature_names or [],
+            "feature_names":   (_feature_names or [])[:10],
             "model_dir":       MODEL_DIR,
             "model_dir_files": os.listdir(MODEL_DIR) if os.path.exists(MODEL_DIR) else "NOT FOUND",
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/reload")
+def reload_models():
+    """Manually trigger model reload — visit /reload if stuck on ready:false."""
+    global _ready, _load_error
+    if _ready:
+        return jsonify({"status": "already ready"})
+    _ready = False
+    _load_error = None
+    t = threading.Thread(target=load_models, daemon=True)
+    t.start()
+    return jsonify({"status": "reload triggered — check /debug in 30s"})
 
 # ── UI (same questionnaire, adds ms timing badge on result) ──────────────────
 
