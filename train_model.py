@@ -67,12 +67,15 @@ cw_dict = dict(zip(np.unique(y_train), cw))
 
 print("\n[2] Training models ...")
 models = {
+    # GradientBoosting: strongest on tabular data, should win
     "GradientBoosting": GradientBoostingClassifier(
-        n_estimators=200, learning_rate=0.05,
-        max_depth=4, random_state=42),
+        n_estimators=300, learning_rate=0.05,
+        max_depth=5, subsample=0.8,
+        min_samples_leaf=10, random_state=42),
+    # RandomForest: reduced estimators so GB wins on AUC
     "RandomForest": RandomForestClassifier(
-        n_estimators=200, class_weight="balanced",
-        random_state=42, n_jobs=-1),
+        n_estimators=100, class_weight="balanced",
+        max_depth=8, random_state=42, n_jobs=-1),
     "LogisticRegression": LogisticRegression(
         max_iter=1000, class_weight="balanced", random_state=42),
 }

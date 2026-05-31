@@ -101,9 +101,8 @@ def reload_route():
     global _ready,_load_error
     if _ready: return jsonify({"status":"already ready"})
     _ready=False; _load_error=None
-    # Load synchronously — sklearn loads in <3s so port opens fast enough for Render
-load_models()
-    return jsonify({"status":"reloading — check /debug in 10s"})
+    load_models()
+    return jsonify({"status":"reloaded","ready":_ready,"error":_load_error})
 
 @app.route("/predict", methods=["POST"])
 def predict():
