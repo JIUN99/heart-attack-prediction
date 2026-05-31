@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.env
+.DS_Store
+venv/
+*.egg-info/
+# Do NOT ignore .pkl and .keras — they are built at deploy time by train_model.py
+# and must exist in the model/ directory at runtime
