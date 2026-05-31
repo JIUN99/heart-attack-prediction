@@ -2,7 +2,7 @@
 app.py - Heart Attack Prediction (scikit-learn only)
 No TensorFlow. RAM ~80MB. Loads in <2s. Render free tier compatible.
 """
-import os, pickle, threading, time
+import os, pickle, time
 import numpy as np
 from flask import Flask, request, jsonify, render_template_string
 
@@ -53,7 +53,8 @@ def load_models():
         _load_error = traceback.format_exc()
         print(f"[startup] ❌ FAILED:\n{_load_error}", flush=True)
 
-threading.Thread(target=load_models, daemon=True).start()
+# Load synchronously — sklearn loads in <3s so port opens fast enough for Render
+load_models()
 
 def _encode(values):
     encoded = {}
@@ -100,7 +101,8 @@ def reload_route():
     global _ready,_load_error
     if _ready: return jsonify({"status":"already ready"})
     _ready=False; _load_error=None
-    threading.Thread(target=load_models, daemon=True).start()
+    # Load synchronously — sklearn loads in <3s so port opens fast enough for Render
+load_models()
     return jsonify({"status":"reloading — check /debug in 10s"})
 
 @app.route("/predict", methods=["POST"])
