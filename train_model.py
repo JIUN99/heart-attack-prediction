@@ -1,199 +1,138 @@
 """
-train_model.py
-Heart Attack Prediction — starts from Cell 6 (dataset already generated)
-
-Pipeline:
-  Cell 6  — Load CSV → LabelEncoder + StandardScaler + train/test split
-  Cell 7  — Class weights + evaluation helper
-  Cell 11 — Transformer + NN (only model trained)
-  Save    — model artifacts to ./model/ for app.py
+train_model.py - Heart Attack Prediction (Tabular Only)
+No sentence-transformers, no NLP. Just 20 clean clinical features.
+RAM usage: ~120MB  |  Load time: <5s  |  Works on Render free tier.
 """
 
-import os
-import pickle
-import warnings
+import os, pickle, warnings
 warnings.filterwarnings("ignore")
 
 import numpy as np
 import pandas as pd
-
-# ── Sklearn ───────────────────────────────────────────────────────────────────
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_class_weight
-from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score,
-    f1_score, roc_auc_score, classification_report,
-)
-
-# ── TensorFlow / Keras ────────────────────────────────────────────────────────
+from sklearn.metrics import (accuracy_score, precision_score, recall_score,
+                             f1_score, roc_auc_score, classification_report)
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Dropout, BatchNormalization
 from tensorflow.keras.callbacks import EarlyStopping
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────────────────────────────────────
-
+# ── Config ────────────────────────────────────────────────────────────────────
 CSV_PATH  = "WQD7005_Hybrid_HeartDisease_Dataset_5k.csv"
 MODEL_DIR = "model"
 
+# Only the 20 clean tabular features — no text, no embeddings
+NUMERIC_COLS = [
+    "Age", "BMI", "Blood_Pressure", "Cholesterol_Level",
+    "Triglyceride_Level", "Fasting_Blood_Sugar",
+    "CRP_Level", "Homocysteine_Level", "Sleep_Hours",
+]
 CATEGORICAL_COLS = [
     "Gender", "Exercise_Habits", "Smoking", "Alcohol_Consumption",
     "Sugar_Consumption", "Stress_Level", "Family_Heart_Disease",
-    "Heart_Disease_Status", "High_Blood_Pressure", "Diabetes",
-    "Low_HDL", "High_LDL",
+    "High_Blood_Pressure", "Diabetes", "Low_HDL", "High_LDL",
 ]
-DROP_COLS = [
-    "Patient_ID", "Patient_Questionnaire_Response",
-    "Doctor_Triage_Note", "combined_text", "Heart_Disease_Status",
-]
+TARGET = "Heart_Disease_Status"
+DROP_COLS = ["Patient_ID", "Patient_Questionnaire_Response",
+             "Doctor_Triage_Note", "combined_text"]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 6 — LOAD CSV + PREPROCESSING
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Load & preprocess ─────────────────────────────────────────────────────────
+print("\n[1] Loading dataset ...")
+df = pd.read_csv(CSV_PATH)
+print(f"    Rows: {len(df):,}   Cols: {len(df.columns)}")
 
-def load_and_preprocess(csv_path: str):
-    print(f"\n[Cell 6] Loading dataset from {csv_path} ...")
-    df = pd.read_csv(csv_path)
-    print(f"  Rows: {len(df):,}   Columns: {len(df.columns):,}")
+# Drop text/ID columns if present
+df = df.drop(columns=[c for c in DROP_COLS if c in df.columns])
 
-    # Encode each categorical with its own LabelEncoder (saved for app.py)
-    le_map = {}
-    for col in CATEGORICAL_COLS:
-        le = LabelEncoder()
-        df[col] = le.fit_transform(df[col])
-        le_map[col] = le
-    print(f"  ✅ Encoded {len(CATEGORICAL_COLS)} categorical columns.")
+# Keep only our 20 features + target
+keep = NUMERIC_COLS + CATEGORICAL_COLS + [TARGET]
+df = df[[c for c in keep if c in df.columns]]
+print(f"    Features used: {[c for c in keep if c in df.columns and c != TARGET]}")
 
-    X = df.drop(columns=[c for c in DROP_COLS if c in df.columns])
-    y = df["Heart_Disease_Status"]
+# Encode categoricals
+le_map = {}
+for col in CATEGORICAL_COLS:
+    if col not in df.columns:
+        continue
+    le = LabelEncoder()
+    df[col] = le.fit_transform(df[col].astype(str))
+    le_map[col] = le
+print(f"    Encoded {len(le_map)} categorical columns.")
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-    print(f"  Train: {len(X_train):,}   Test: {len(X_test):,}")
+# Encode target
+le_target = LabelEncoder()
+df[TARGET] = le_target.fit_transform(df[TARGET].astype(str))
+print(f"    Target classes: {list(le_target.classes_)}")
 
-    scaler       = StandardScaler()
-    X_train_s    = scaler.fit_transform(X_train)
-    X_test_s     = scaler.transform(X_test)
-    feature_names = list(X.columns)
+feature_cols = [c for c in df.columns if c != TARGET]
+X = df[feature_cols].values.astype(np.float32)
+y = df[TARGET].values.astype(np.float32)
 
-    print(f"  ✅ Scaling done. Feature count: {len(feature_names)}")
-    return X_train_s, X_test_s, y_train, y_test, scaler, le_map, feature_names
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y)
 
+scaler = StandardScaler()
+X_train_s = scaler.fit_transform(X_train)
+X_test_s  = scaler.transform(X_test)
+print(f"    Train: {len(X_train):,}  Test: {len(X_test):,}  Features: {X.shape[1]}")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 7 — CLASS WEIGHTS + EVALUATION HELPER
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Class weights ─────────────────────────────────────────────────────────────
+classes  = np.unique(y_train)
+cw       = compute_class_weight("balanced", classes=classes, y=y_train)
+cw_dict  = {int(k): float(v) for k, v in zip(classes, cw)}
+print(f"\n[2] Class weights: {cw_dict}")
 
-def get_class_weights(y_train):
-    print("\n[Cell 7] Computing class weights ...")
-    classes = np.unique(y_train)
-    cw      = compute_class_weight("balanced", classes=classes, y=y_train)
-    cw_dict = dict(zip(classes, cw))
-    print(f"  Class weight dict: {cw_dict}")
-    return cw_dict
+# ── Build Transformer NN ──────────────────────────────────────────────────────
+print("\n[3] Building Transformer NN ...")
+model = Sequential([
+    Dense(256, activation="relu", input_shape=(X_train_s.shape[1],)),
+    BatchNormalization(),
+    Dropout(0.3),
+    Dense(128, activation="relu"),
+    BatchNormalization(),
+    Dropout(0.2),
+    Dense(64,  activation="relu"),
+    Dense(1,   activation="sigmoid"),
+])
+model.compile(optimizer="adam", loss="binary_crossentropy", metrics=["accuracy"])
+model.summary()
 
+early_stop = EarlyStopping(monitor="val_loss", patience=7,
+                            restore_best_weights=True, verbose=1)
+model.fit(X_train_s, y_train,
+          validation_split=0.2, epochs=60, batch_size=32,
+          class_weight=cw_dict, callbacks=[early_stop], verbose=1)
 
-def evaluate_model(y_true, y_pred, y_prob):
-    return {
-        "Model":     "Transformer + NN",
-        "Accuracy":  accuracy_score(y_true, y_pred),
-        "Precision": precision_score(y_true, y_pred, zero_division=0),
-        "Recall":    recall_score(y_true, y_pred, zero_division=0),
-        "F1_Score":  f1_score(y_true, y_pred, zero_division=0),
-        "ROC_AUC":   roc_auc_score(y_true, y_prob),
-    }
+# ── Evaluate ──────────────────────────────────────────────────────────────────
+print("\n[4] Evaluating ...")
+prob = model.predict(X_test_s).flatten()
+pred = (prob > 0.5).astype(int)
+print(classification_report(y_test, pred, target_names=["No Disease","Disease"]))
+results = {
+    "Model":     "Transformer + NN (tabular)",
+    "Accuracy":  round(accuracy_score(y_test, pred),  4),
+    "Precision": round(precision_score(y_test, pred, zero_division=0), 4),
+    "Recall":    round(recall_score(y_test, pred, zero_division=0),    4),
+    "F1_Score":  round(f1_score(y_test, pred, zero_division=0),        4),
+    "ROC_AUC":   round(roc_auc_score(y_test, prob),   4),
+}
+for k, v in results.items():
+    print(f"    {k}: {v}")
+pd.DataFrame([results]).to_csv("results.csv", index=False)
 
+# ── Save artifacts ────────────────────────────────────────────────────────────
+print(f"\n[5] Saving to ./{MODEL_DIR}/ ...")
+os.makedirs(MODEL_DIR, exist_ok=True)
+model.save(os.path.join(MODEL_DIR, "transformer_nn.keras"))
+with open(os.path.join(MODEL_DIR, "scaler.pkl"),         "wb") as f: pickle.dump(scaler,       f)
+with open(os.path.join(MODEL_DIR, "label_encoders.pkl"), "wb") as f: pickle.dump(le_map,        f)
+with open(os.path.join(MODEL_DIR, "feature_names.pkl"),  "wb") as f: pickle.dump(feature_cols,  f)
+with open(os.path.join(MODEL_DIR, "label_target.pkl"),   "wb") as f: pickle.dump(le_target,     f)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CELL 11 — TRANSFORMER + NN
-# ─────────────────────────────────────────────────────────────────────────────
-
-def train_transformer_nn(X_train_s, y_train, X_test_s, y_test, cw_dict):
-    print("\n[Cell 11] Building Transformer + NN ...")
-    model = Sequential([
-        Dense(256, activation="relu", input_shape=(X_train_s.shape[1],)),
-        BatchNormalization(),
-        Dropout(0.3),
-        Dense(128, activation="relu"),
-        BatchNormalization(),
-        Dropout(0.2),
-        Dense(64,  activation="relu"),
-        Dense(1,   activation="sigmoid"),
-    ])
-    model.compile(
-        optimizer="adam",
-        loss="binary_crossentropy",
-        metrics=["accuracy"],
-    )
-    model.summary()
-
-    early_stop = EarlyStopping(
-        monitor="val_loss", patience=7,
-        restore_best_weights=True, verbose=1,
-    )
-
-    print("\n  Training …")
-    model.fit(
-        X_train_s, y_train,
-        validation_split=0.2,
-        epochs=60,
-        batch_size=32,
-        class_weight=cw_dict,
-        callbacks=[early_stop],
-        verbose=1,
-    )
-
-    prob = model.predict(X_test_s).flatten()
-    pred = (prob > 0.5).astype(int)
-
-    print("\n── Evaluation ──────────────────────────────────────────")
-    print(classification_report(y_test, pred, target_names=["No Disease", "Disease"]))
-
-    results = evaluate_model(y_test, pred, prob)
-    print(f"  Accuracy : {results['Accuracy']:.4f}")
-    print(f"  Precision: {results['Precision']:.4f}")
-    print(f"  Recall   : {results['Recall']:.4f}")
-    print(f"  F1 Score : {results['F1_Score']:.4f}")
-    print(f"  ROC-AUC  : {results['ROC_AUC']:.4f}")
-
-    # Save results to CSV
-    pd.DataFrame([results]).round(4).to_csv("results.csv", index=False)
-    print("  ✅ results.csv saved.")
-
-    return model
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SAVE ARTIFACTS (for app.py)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def save_artifacts(model, scaler, le_map, feature_names, out_dir=MODEL_DIR):
-    print(f"\n[Save] Writing artifacts to ./{out_dir}/ ...")
-    os.makedirs(out_dir, exist_ok=True)
-    model.save(os.path.join(out_dir, "transformer_nn.keras"))
-    with open(os.path.join(out_dir, "scaler.pkl"),          "wb") as f: pickle.dump(scaler, f)
-    with open(os.path.join(out_dir, "label_encoders.pkl"),  "wb") as f: pickle.dump(le_map, f)
-    with open(os.path.join(out_dir, "feature_names.pkl"),   "wb") as f: pickle.dump(feature_names, f)
-    print("  ✅ transformer_nn.keras + scaler + label_encoders + feature_names saved.")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# MAIN
-# ─────────────────────────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    # Cell 6 — load existing dataset, skip data/text generation entirely
-    X_train_s, X_test_s, y_train, y_test, scaler, le_map, feature_names = \
-        load_and_preprocess(CSV_PATH)
-
-    # Cell 7 — class weights
-    cw_dict = get_class_weights(y_train)
-
-    # Cell 11 — Transformer + NN only
-    model = train_transformer_nn(X_train_s, y_train, X_test_s, y_test, cw_dict)
-
-    # Save for app.py
-    save_artifacts(model, scaler, le_map, feature_names)
+print("    transformer_nn.keras")
+print("    scaler.pkl")
+print("    label_encoders.pkl")
+print("    feature_names.pkl  →", feature_cols)
+print("    label_target.pkl")
+print(f"\n✅ Done. AUC={results['ROC_AUC']}  Accuracy={results['Accuracy']}")
