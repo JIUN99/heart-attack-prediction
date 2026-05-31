@@ -31,15 +31,19 @@ NUMERIC_DEFAULTS = {
 
 def load_models():
     global _ready,_load_error,_model,_scaler,_le_map,_feature_names,_meta
+    t0 = time.time()
     try:
-        t0 = time.time()
-        print("[startup] Loading model artifacts ...", flush=True)
+        print("[startup] Loading best_model.pkl ...", flush=True)
         with open(os.path.join(MODEL_DIR,"best_model.pkl"),     "rb") as f: _model         = pickle.load(f)
+        print("[startup] Loading scaler.pkl ...", flush=True)
         with open(os.path.join(MODEL_DIR,"scaler.pkl"),         "rb") as f: _scaler        = pickle.load(f)
+        print("[startup] Loading label_encoders.pkl ...", flush=True)
         with open(os.path.join(MODEL_DIR,"label_encoders.pkl"), "rb") as f: _le_map        = pickle.load(f)
+        print("[startup] Loading feature_names.pkl ...", flush=True)
         with open(os.path.join(MODEL_DIR,"feature_names.pkl"),  "rb") as f: _feature_names = pickle.load(f)
+        print("[startup] Loading meta.pkl ...", flush=True)
         with open(os.path.join(MODEL_DIR,"meta.pkl"),           "rb") as f: _meta          = pickle.load(f)
-        # warm-up
+        print(f"[startup] All files loaded in {time.time()-t0:.1f}s, running warm-up ...", flush=True)
         dummy = np.zeros((1, len(_feature_names)), dtype=np.float32)
         _model.predict_proba(dummy)
         _ready = True
