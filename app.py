@@ -61,31 +61,31 @@ HF_TOKEN   = os.environ.get("HF_TOKEN", "")
 HF_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3"
 
 def _genai_advice(data: dict, label: str, pct: float) -> str:
-    """Call HuggingFace Inference API to generate personalised advice."""
-    risk_factors = []
-    if float(data.get("Age", 50)) > 55:           risk_factors.append(f"age {int(data['Age'])}")
-    if data.get("Smoking") == "Yes":               risk_factors.append("smoking")
-    if data.get("Diabetes") == "Yes":              risk_factors.append("diabetes")
-    if data.get("High_Blood_Pressure") == "Yes":   risk_factors.append(f"high BP ({int(float(data.get('Blood_Pressure',120)))} mmHg)")
-    if data.get("Family_Heart_Disease") == "Yes":  risk_factors.append("family history of heart disease")
-    if data.get("High_LDL") == "Yes":              risk_factors.append(f"high LDL (cholesterol {int(float(data.get('Cholesterol_Level',200)))} mg/dL)")
-    if data.get("Low_HDL") == "Yes":               risk_factors.append("low HDL")
-    if float(data.get("BMI", 25)) > 30:            risk_factors.append(f"BMI {float(data.get('BMI',25)):.1f} (obese)")
-    if data.get("Stress_Level") == "High":         risk_factors.append("high stress")
-    if data.get("Exercise_Habits") == "Low":       risk_factors.append("low exercise")
-    if float(data.get("Sleep_Hours", 7)) < 6:      risk_factors.append(f"poor sleep ({data.get('Sleep_Hours')} hrs/night)")
-
-    factors_str = ", ".join(risk_factors) if risk_factors else "no major risk factors identified"
-
+    """Call HuggingFace Inference API to generate personalised advice.
+    Passes ALL raw patient values directly — no rule-based extraction.
+    """
     prompt = (
         f"<s>[INST] You are a compassionate cardiac health advisor. "
-        f"A patient received a heart attack risk assessment result of **{label}** "
-        f"with a risk probability of {pct}%. "
-        f"Their key health factors are: {factors_str}. "
-        f"Write a warm, personalised 3-4 sentence health advice paragraph specifically addressing "
-        f"their individual risk factors. Be specific — mention their actual numbers and conditions. "
-        f"End with one encouraging sentence. Do not use bullet points. Do not repeat the risk score. "
-        f"Do not mention you are an AI. [/INST]"
+        f"A patient just completed a heart attack risk assessment. "
+        f"The AI model predicted: {label} ({pct}% probability). "
+        f"Here are the patient's full clinical details:\n"
+        f"- Age: {data.get('Age', 50)} years, Gender: {data.get('Gender', 'Unknown')}\n"
+        f"- BMI: {data.get('BMI', 25)}, Blood Pressure: {data.get('Blood_Pressure', 120)} mmHg\n"
+        f"- Cholesterol: {data.get('Cholesterol_Level', 200)} mg/dL, Triglycerides: {data.get('Triglyceride_Level', 150)} mg/dL\n"
+        f"- Fasting Blood Sugar: {data.get('Fasting_Blood_Sugar', 95)} mg/dL, CRP: {data.get('CRP_Level', 3)} mg/L\n"
+        f"- Homocysteine: {data.get('Homocysteine_Level', 10)} umol/L, Sleep: {data.get('Sleep_Hours', 7)} hrs/night\n"
+        f"- High BP: {data.get('High_Blood_Pressure', 'No')}, Diabetes: {data.get('Diabetes', 'No')}\n"
+        f"- Low HDL: {data.get('Low_HDL', 'No')}, High LDL: {data.get('High_LDL', 'No')}\n"
+        f"- Family History of Heart Disease: {data.get('Family_Heart_Disease', 'No')}\n"
+        f"- Smoking: {data.get('Smoking', 'No')}, Alcohol: {data.get('Alcohol_Consumption', 'Low')}\n"
+        f"- Exercise: {data.get('Exercise_Habits', 'Medium')}, Stress: {data.get('Stress_Level', 'Medium')}\n"
+        f"- Sugar Consumption: {data.get('Sugar_Consumption', 'Medium')}\n\n"
+        f"Based on ALL of this patient's specific data, write a warm, personalised 3-4 sentence "
+        f"health advice paragraph. Reason from their actual values — mention specific numbers and "
+        f"conditions that stand out. Prioritise the most important changes this specific patient "
+        f"should make. End with one short encouraging sentence. "
+        f"Do not use bullet points. Do not repeat the risk label or percentage. "
+        f"Do not say you are an AI. Speak directly to the patient as 'you'. [/INST]"
     )
 
     payload = json.dumps({
