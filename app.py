@@ -2,7 +2,8 @@
 app.py - Heart Attack Prediction (scikit-learn only)
 No TensorFlow. RAM ~80MB. Loads in <2s. Render free tier compatible.
 """
-import os, pickle, time
+import os, pickle, time, json
+import urllib.request, urllib.error
 import numpy as np
 from flask import Flask, request, jsonify, render_template_string
 
@@ -56,6 +57,67 @@ def load_models():
 # Load synchronously — sklearn loads in <3s so port opens fast enough for Render
 load_models()
 
+HF_TOKEN   = os.environ.get("HF_TOKEN", "")
+HF_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3"
+
+def _genai_advice(data: dict, label: str, pct: float) -> str:
+    """Call HuggingFace Inference API to generate personalised advice."""
+    risk_factors = []
+    if float(data.get("Age", 50)) > 55:           risk_factors.append(f"age {int(data['Age'])}")
+    if data.get("Smoking") == "Yes":               risk_factors.append("smoking")
+    if data.get("Diabetes") == "Yes":              risk_factors.append("diabetes")
+    if data.get("High_Blood_Pressure") == "Yes":   risk_factors.append(f"high BP ({int(float(data.get('Blood_Pressure',120)))} mmHg)")
+    if data.get("Family_Heart_Disease") == "Yes":  risk_factors.append("family history of heart disease")
+    if data.get("High_LDL") == "Yes":              risk_factors.append(f"high LDL (cholesterol {int(float(data.get('Cholesterol_Level',200)))} mg/dL)")
+    if data.get("Low_HDL") == "Yes":               risk_factors.append("low HDL")
+    if float(data.get("BMI", 25)) > 30:            risk_factors.append(f"BMI {float(data.get('BMI',25)):.1f} (obese)")
+    if data.get("Stress_Level") == "High":         risk_factors.append("high stress")
+    if data.get("Exercise_Habits") == "Low":       risk_factors.append("low exercise")
+    if float(data.get("Sleep_Hours", 7)) < 6:      risk_factors.append(f"poor sleep ({data.get('Sleep_Hours')} hrs/night)")
+
+    factors_str = ", ".join(risk_factors) if risk_factors else "no major risk factors identified"
+
+    prompt = (
+        f"<s>[INST] You are a compassionate cardiac health advisor. "
+        f"A patient received a heart attack risk assessment result of **{label}** "
+        f"with a risk probability of {pct}%. "
+        f"Their key health factors are: {factors_str}. "
+        f"Write a warm, personalised 3-4 sentence health advice paragraph specifically addressing "
+        f"their individual risk factors. Be specific — mention their actual numbers and conditions. "
+        f"End with one encouraging sentence. Do not use bullet points. Do not repeat the risk score. "
+        f"Do not mention you are an AI. [/INST]"
+    )
+
+    payload = json.dumps({
+        "inputs": prompt,
+        "parameters": {
+            "max_new_tokens": 200,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "do_sample": True,
+            "return_full_text": False,
+        }
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        HF_API_URL, data=payload,
+        headers={"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+            if isinstance(result, list) and result:
+                text = result[0].get("generated_text", "").strip()
+                if "[/INST]" in text:
+                    text = text.split("[/INST]")[-1].strip()
+                return text
+            if isinstance(result, dict) and "error" in result:
+                return None  # model loading — fallback to rule-based
+    except Exception as e:
+        print(f"[advice] HF API error: {e}", flush=True)
+    return None
+
 def _encode(values):
     encoded = {}
     for col, le in _le_map.items():
@@ -103,6 +165,25 @@ def reload_route():
     _ready=False; _load_error=None
     load_models()
     return jsonify({"status":"reloaded","ready":_ready,"error":_load_error})
+
+@app.route("/advice", methods=["POST"])
+def advice():
+    """Generate GenAI personalised advice for a given prediction result."""
+    data  = request.get_json(force=True) or {}
+    label = data.pop("label", "Low Risk")
+    pct   = float(data.pop("pct", 0))
+    text  = _genai_advice(data, label, pct)
+    if text:
+        return jsonify({"advice": text, "source": "genai"})
+    # Fallback to rule-based if HF API unavailable
+    hi = label == "High Risk"
+    fallback = (
+        "Your results indicate elevated cardiovascular risk. Please consult a cardiologist promptly, monitor your blood pressure and cholesterol regularly, adopt a heart-healthy diet low in saturated fats, aim for 150 minutes of moderate exercise per week, and manage stress through better sleep and mindfulness."
+        if hi else
+        "Your results indicate lower cardiovascular risk — great work! Keep up your regular physical activity, continue your balanced diet and healthy sleep schedule, schedule annual health check-ups, and monitor your blood pressure and blood sugar periodically."
+    )
+    return jsonify({"advice": fallback, "source": "fallback"})
+
 
 @app.route("/predict", methods=["POST"])
 def predict():
@@ -342,11 +423,25 @@ async function submitForm(){
     document.getElementById('rProb').textContent='Risk Probability: '+d.pct+'%';
     document.getElementById('rBar').style.width=d.pct+'%';
     document.getElementById('rMs').textContent='⚡ '+d.ms+'ms';
-    document.getElementById('rAdvice').textContent=hi
-      ?'Elevated cardiovascular risk detected.\n\n• Consult a cardiologist promptly\n• Monitor BP and cholesterol regularly\n• Reduce saturated fats, increase fibre\n• Aim for 150 min exercise per week\n• Quit smoking if applicable\n• Manage stress and improve sleep'
-      :'Lower cardiovascular risk — keep it up!\n\n• Maintain regular physical activity\n• Continue balanced diet and good sleep\n• Schedule annual health check-ups\n• Monitor BP and blood sugar periodically\n• Avoid smoking and excess alcohol';
+    // Show result card immediately with loading advice
+    document.getElementById('rAdvice').innerHTML='<span style="color:var(--muted);font-style:italic">🤖 Generating personalised advice...</span>';
     document.getElementById('result').style.display='block';
     document.getElementById('result').scrollIntoView({behavior:'smooth',block:'start'});
+    // Fetch GenAI advice in background
+    const advicePayload = {...data, label: d.label, pct: d.pct};
+    fetch('/advice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(advicePayload)})
+      .then(r=>r.json())
+      .then(a=>{
+        const src = a.source==='genai' ? '🤖 AI-generated advice' : '📋 General advice';
+        document.getElementById('rAdvice').innerHTML =
+          '<div style="font-size:.72rem;color:var(--muted);margin-bottom:8px;font-weight:600;letter-spacing:.04em">'+src+'</div>'+
+          '<div>'+a.advice.replace(/\n/g,'<br/>')+'</div>';
+      })
+      .catch(()=>{
+        document.getElementById('rAdvice').textContent=hi
+          ?'Please consult a cardiologist, monitor your blood pressure and cholesterol, adopt a heart-healthy diet, exercise regularly, and manage stress.'
+          :'Keep up your healthy lifestyle with regular exercise, balanced diet, good sleep, and annual check-ups.';
+      });
   }catch(e){
     document.getElementById('loading').style.display='none'; btn.disabled=false;
     alert('Request failed: '+e);
