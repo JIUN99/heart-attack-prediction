@@ -341,7 +341,7 @@ async function submitForm(){
     document.getElementById('rLabel').textContent=d.label;
     document.getElementById('rProb').textContent='Risk Probability: '+d.pct+'%';
     document.getElementById('rBar').style.width=d.pct+'%';
-    document.getElementById('rMs').textContent='⚡ '+d.ms+'ms · Model: '+d.model;
+    document.getElementById('rMs').textContent='⚡ '+d.ms+'ms';
     document.getElementById('rAdvice').textContent=hi
       ?'Elevated cardiovascular risk detected.\n\n• Consult a cardiologist promptly\n• Monitor BP and cholesterol regularly\n• Reduce saturated fats, increase fibre\n• Aim for 150 min exercise per week\n• Quit smoking if applicable\n• Manage stress and improve sleep'
       :'Lower cardiovascular risk — keep it up!\n\n• Maintain regular physical activity\n• Continue balanced diet and good sleep\n• Schedule annual health check-ups\n• Monitor BP and blood sugar periodically\n• Avoid smoking and excess alcohol';
