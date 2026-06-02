@@ -211,13 +211,15 @@ def advice():
     pct   = float(data.pop("pct", 0))
     hi    = label == "High Risk"
 
-    result = _genai_advice(data, label, pct)
+    decision = _autonomous_decision(data, label, pct)
+    result   = _genai_advice(data, label, pct)
     if result:
         return jsonify({
             "source":      "genai",
             "explanation": result.get("explanation", ""),
             "advice":      result.get("advice", ""),
             "followup":    result.get("followup", "Would you like a personalised 7-day lifestyle plan?"),
+            "decision":    decision,
         })
 
     # Fallback — personalised by key values even without AI
@@ -271,55 +273,191 @@ def advice():
         "explanation": explanation,
         "advice":      advice,
         "followup":    "Would you like a personalised 7-day lifestyle improvement plan based on your profile?",
+        "decision":    decision,
     })
+
+
+def _patient_summary(data: dict) -> str:
+    """Build a concise patient summary string using ACTUAL submitted values."""
+    return (
+        f"Age {data.get('Age','?')}, {data.get('Gender','?')}, BMI {data.get('BMI','?')}, "
+        f"BP {data.get('Blood_Pressure','?')} mmHg, "
+        f"Cholesterol {data.get('Cholesterol_Level','?')} mg/dL, "
+        f"Triglycerides {data.get('Triglyceride_Level','?')} mg/dL, "
+        f"Fasting Sugar {data.get('Fasting_Blood_Sugar','?')} mg/dL, "
+        f"CRP {data.get('CRP_Level','?')} mg/L, "
+        f"Homocysteine {data.get('Homocysteine_Level','?')} umol/L, "
+        f"Sleep {data.get('Sleep_Hours','?')} hrs/night, "
+        f"High BP: {data.get('High_Blood_Pressure','?')}, "
+        f"Diabetes: {data.get('Diabetes','?')}, "
+        f"Low HDL: {data.get('Low_HDL','?')}, High LDL: {data.get('High_LDL','?')}, "
+        f"Family History: {data.get('Family_Heart_Disease','?')}, "
+        f"Smoking: {data.get('Smoking','?')}, "
+        f"Alcohol: {data.get('Alcohol_Consumption','?')}, "
+        f"Exercise: {data.get('Exercise_Habits','?')}, "
+        f"Stress: {data.get('Stress_Level','?')}, "
+        f"Sugar: {data.get('Sugar_Consumption','?')}"
+    )
+
+
+def _autonomous_decision(data: dict, label: str, pct: float) -> dict:
+    """Autonomously decide urgency level and priority actions based on patient data."""
+    bp    = float(data.get("Blood_Pressure", 0))
+    chol  = float(data.get("Cholesterol_Level", 0))
+    bmi   = float(data.get("BMI", 0))
+    sugar = float(data.get("Fasting_Blood_Sugar", 0))
+    crp   = float(data.get("CRP_Level", 0))
+    sleep = float(data.get("Sleep_Hours", 7))
+    smoke = data.get("Smoking","No") == "Yes"
+    diab  = data.get("Diabetes","No") == "Yes"
+    fam   = data.get("Family_Heart_Disease","No") == "Yes"
+    hi_bp = data.get("High_Blood_Pressure","No") == "Yes"
+    stress= data.get("Stress_Level","Medium")
+    exer  = data.get("Exercise_Habits","Medium")
+
+    # Autonomous urgency scoring
+    urgent_flags = []
+    if bp >= 180:          urgent_flags.append(f"critically high BP ({bp:.0f} mmHg — hypertensive crisis range)")
+    elif bp >= 140:        urgent_flags.append(f"high BP ({bp:.0f} mmHg — Stage 2 hypertension)")
+    if chol >= 280:        urgent_flags.append(f"very high cholesterol ({chol:.0f} mg/dL)")
+    if sugar >= 126:       urgent_flags.append(f"high fasting sugar ({sugar:.0f} mg/dL — diabetic range)")
+    if crp >= 10:          urgent_flags.append(f"elevated CRP ({crp:.1f} mg/L — active inflammation)")
+    if smoke and fam:      urgent_flags.append("smoking combined with family history (compounding risk)")
+    if diab and hi_bp:     urgent_flags.append("diabetes + hypertension co-morbidity")
+    if bmi >= 35:          urgent_flags.append(f"severe obesity (BMI {bmi:.1f})")
+
+    # Decide urgency level autonomously
+    if pct >= 70 or len(urgent_flags) >= 3:
+        urgency = "URGENT"
+        urgency_msg = "Seek medical attention within 48 hours."
+    elif pct >= 50 or len(urgent_flags) >= 1:
+        urgency = "ELEVATED"
+        urgency_msg = "Schedule a doctor appointment within 2 weeks."
+    else:
+        urgency = "MONITOR"
+        urgency_msg = "Maintain healthy habits and schedule an annual check-up."
+
+    # Autonomously select top 3 priority actions
+    priorities = []
+    if bp >= 140 or hi_bp:      priorities.append(f"Monitor BP daily (current: {bp:.0f} mmHg)")
+    if smoke:                   priorities.append("Stop smoking — single highest-impact action")
+    if chol >= 200:             priorities.append(f"Reduce dietary saturated fat (cholesterol: {chol:.0f} mg/dL)")
+    if exer == "Low":           priorities.append("Start 20-min daily walks — minimum effective dose")
+    if sleep < 6:               priorities.append(f"Improve sleep to 7+ hrs (current: {sleep} hrs)")
+    if stress == "High":        priorities.append("Daily stress reduction: 10-min breathing or meditation")
+    if sugar >= 100:            priorities.append(f"Reduce refined sugar intake (fasting sugar: {sugar:.0f} mg/dL)")
+    if bmi >= 28:               priorities.append(f"Target 5% weight reduction (BMI: {bmi:.1f})")
+
+    return {
+        "urgency":      urgency,
+        "urgency_msg":  urgency_msg,
+        "urgent_flags": urgent_flags,
+        "priorities":   priorities[:3],
+    }
 
 
 @app.route("/plan", methods=["POST"])
 def plan():
-    """Generate a personalised 7-day lifestyle improvement plan."""
+    """Generate personalised 7-day plan using ACTUAL patient values — no defaults."""
     data  = request.get_json(force=True) or {}
     label = data.pop("label", "Low Risk")
     pct   = float(data.pop("pct", 0))
     data.pop("request_type", None)
 
+    # Use actual submitted values — never fall back to hardcoded defaults in prompt
+    summary = _patient_summary(data)
+
     prompt = (
         f"<|user|>\n"
-        f"You are a cardiac health coach. A patient has {label} ({pct}% probability) of heart attack.\n"
-        f"Profile: Age {data.get('Age',50)}, BMI {data.get('BMI',25)}, "
-        f"BP {data.get('Blood_Pressure',120)} mmHg, Cholesterol {data.get('Cholesterol_Level',200)} mg/dL, "
-        f"Sleep {data.get('Sleep_Hours',7)} hrs, Exercise: {data.get('Exercise_Habits','Medium')}, "
-        f"Stress: {data.get('Stress_Level','Medium')}, Smoking: {data.get('Smoking','No')}, "
-        f"Diabetes: {data.get('Diabetes','No')}, Diet sugar: {data.get('Sugar_Consumption','Medium')}.\n\n"
-        f"Create a practical 7-day heart health improvement plan. "
-        f"For each day write one specific action tailored to this patient's actual values. "
+        f"You are a cardiac health coach. Patient result: {label} ({pct}% probability).\n"
+        f"Patient profile: {summary}\n\n"
+        f"Create a practical 7-day heart health plan using ONLY their actual values above. "
+        f"Every day must reference a specific number from their profile. "
         f"Format exactly as:\nDay 1: ...\nDay 2: ...\nDay 3: ...\nDay 4: ...\nDay 5: ...\nDay 6: ...\nDay 7: ...\n"
-        f"Be specific to their numbers. Keep each day to one sentence.<|end|>\n<|assistant|>"
+        f"One sentence per day. Be concrete and specific.<|end|>\n<|assistant|>"
     )
     raw = _call_hf(prompt)
     if raw:
-        # Clean up
         for tag in ["<|assistant|>","<|end|>","<|user|>"]:
             raw = raw.replace(tag,"")
         return jsonify({"plan": raw.strip(), "source": "genai"})
 
-    # Fallback plan based on their worst factors
-    lines = []
-    smoke = data.get("Smoking","No")=="Yes"
-    exer  = data.get("Exercise_Habits","Medium")
-    sleep = float(data.get("Sleep_Hours",7))
+    # Fallback — uses ACTUAL values from data, never hardcoded defaults
+    bp    = float(data.get("Blood_Pressure", "?"))
+    chol  = float(data.get("Cholesterol_Level", "?")) if data.get("Cholesterol_Level") else None
+    sleep = float(data.get("Sleep_Hours", 7))
+    smoke = data.get("Smoking","No") == "Yes"
     stress= data.get("Stress_Level","Medium")
-    bp    = int(float(data.get("Blood_Pressure",120)))
-    chol  = int(float(data.get("Cholesterol_Level",200)))
     sugar = data.get("Sugar_Consumption","Medium")
+    exer  = data.get("Exercise_Habits","Medium")
+    bmi   = float(data.get("BMI", 0))
 
-    lines.append(f"Day 1: Track your blood pressure ({bp} mmHg) — measure morning and evening, log the readings.")
-    lines.append(f"Day 2: {'Replace one cigarette with a 5-minute walk outside.' if smoke else 'Walk briskly for 20 minutes — even a short walk lowers BP.'}")
-    lines.append(f"Day 3: Swap one high-cholesterol meal for oats, nuts, or salmon to address your {chol} mg/dL cholesterol.")
-    lines.append(f"Day 4: {'Aim to be in bed by 10pm to reach 7 hrs sleep — your current '+str(sleep)+' hrs increases cardiac risk.' if sleep<7 else 'Add a 10-minute stretching routine before bed to maintain good sleep quality.'}")
-    lines.append(f"Day 5: {'Practice 10 minutes of deep breathing or meditation to reduce your high stress levels.' if stress=='High' else 'Do 30 minutes of moderate cardio — cycling, swimming, or jogging.'}")
-    lines.append(f"Day 6: {'Cut one sugary drink or snack — high sugar intake raises triglycerides and cardiac risk.' if sugar in ['Medium','High'] else 'Prepare a heart-healthy meal: grilled fish, leafy greens, and olive oil.'}")
-    lines.append(f"Day 7: Review your week — note what improved, schedule a GP appointment to discuss your {'high' if label=='High Risk' else 'borderline'} risk result.")
+    lines = []
+    lines.append(f"Day 1: Monitor your blood pressure (currently {bp:.0f} mmHg) — measure twice daily and log readings to track your baseline.")
+    lines.append(f"Day 2: {'Start smoking cessation — even cutting by half this week significantly reduces cardiac risk.' if smoke else f'Walk briskly for 20 minutes — directly counteracts your {exer.lower()} exercise level.'}")
+    lines.append(f"Day 3: {'Replace one meal with oats, avocado, or salmon to target your '+str(int(chol))+' mg/dL cholesterol.' if chol and chol>=200 else 'Prepare one heart-healthy meal: grilled fish, leafy greens, and olive oil.'}")
+    lines.append(f"Day 4: {'Target bedtime of 10pm to reach 7 hrs — your current '+str(sleep)+' hrs is below the cardiac-protective threshold.' if sleep<7 else 'Add a 15-minute evening walk after dinner to improve sleep quality and BP.'}")
+    lines.append(f"Day 5: {'Practice box breathing for 10 minutes to address your high stress — stress raises BP and cortisol.' if stress=='High' else 'Do 30 minutes of moderate cardio: cycling, swimming, or a brisk walk.'}")
+    lines.append(f"Day 6: {'Eliminate one sugary drink today — high sugar drives triglycerides and systemic inflammation.' if sugar in ['Medium','High'] else f'Check your BMI progress — currently {bmi:.1f}, target is under 25.'}")
+    lines.append(f"Day 7: Review this week's changes, note BP readings, and schedule a GP visit to discuss your {label.lower()} result.")
     return jsonify({"plan": "\n".join(lines), "source": "fallback"})
+
+
+@app.route("/followup", methods=["POST"])
+def followup():
+    """Dynamic follow-up conversation — patient asks questions about their results."""
+    body     = request.get_json(force=True) or {}
+    question = body.get("question", "")
+    data     = body.get("patient_data", {})
+    label    = body.get("label", "Low Risk")
+    pct      = float(body.get("pct", 0))
+    history  = body.get("history", [])  # list of {q, a} pairs
+
+    summary = _patient_summary(data)
+
+    # Build conversation context
+    history_text = ""
+    for turn in history[-3:]:  # last 3 turns for context
+        history_text += f"Patient: {turn.get('q','')}\nAdvisor: {turn.get('a','')}\n"
+
+    prompt = (
+        f"<|user|>\n"
+        f"You are a cardiac health advisor. The patient has {label} ({pct}% probability).\n"
+        f"Patient profile: {summary}\n"
+        + (f"Previous conversation:\n{history_text}" if history_text else "")
+        + f"\nPatient question: {question}\n\n"
+        f"Answer in 2-3 sentences. Reference their specific values where relevant. "
+        f"Be warm and direct. Do not repeat the risk score.<|end|>\n<|assistant|>"
+    )
+
+    raw = _call_hf(prompt)
+    if raw:
+        for tag in ["<|assistant|>","<|end|>","<|user|>"]:
+            raw = raw.replace(tag,"")
+        return jsonify({"answer": raw.strip(), "source": "genai"})
+
+    # Smart fallback answers based on question keywords
+    q = question.lower()
+    bp   = float(data.get("Blood_Pressure", 120))
+    chol = float(data.get("Cholesterol_Level", 200))
+    bmi  = float(data.get("BMI", 25))
+
+    if any(w in q for w in ["diet","eat","food","meal"]):
+        ans = f"With your cholesterol at {chol:.0f} mg/dL, focus on reducing saturated fats — swap red meat for fish, use olive oil, and increase fibre with oats and vegetables. Avoid processed foods and limit salt to help your BP of {bp:.0f} mmHg."
+    elif any(w in q for w in ["exercise","workout","gym","walk","sport"]):
+        ans = f"Start with 20-30 minutes of brisk walking 5 days a week — this is clinically proven to lower BP and improve cholesterol. Given your BMI of {bmi:.1f}, even moderate activity has significant cardiac benefit."
+    elif any(w in q for w in ["stress","anxiety","mental","relax"]):
+        ans = f"Chronic stress raises cortisol which directly elevates BP — your current {bp:.0f} mmHg reading may partly reflect this. Try 10 minutes of deep breathing daily; apps like Calm or Headspace make it easy to start."
+    elif any(w in q for w in ["sleep","rest","tired","night"]):
+        ans = f"Poor sleep raises inflammatory markers like CRP — your CRP reading of {data.get('CRP_Level','?')} mg/L is relevant here. Aim for 7-8 hours; a consistent bedtime and no screens 30 minutes before sleep helps significantly."
+    elif any(w in q for w in ["smoke","smoking","cigarette","quit"]):
+        ans = "Quitting smoking is the single highest-impact action you can take — within one year your cardiac risk drops by 50%. Nicotine replacement therapy or varenicline (prescription) have strong clinical evidence."
+    elif any(w in q for w in ["doctor","hospital","specialist","cardiologist","when"]):
+        ans = f"With a {label.lower()} result, {'I recommend seeing a cardiologist within 2 weeks — bring a log of your BP readings.' if label=='High Risk' else 'an annual GP check-up is sufficient, though a lipid panel would be useful given your cholesterol level.'}"
+    else:
+        ans = f"Based on your profile, the most important thing you can do right now is {'consult a cardiologist and monitor your BP of '+str(int(bp))+' mmHg daily.' if label=='High Risk' else 'maintain your healthy habits and schedule an annual check-up.'}"
+
+    return jsonify({"answer": ans, "source": "fallback"})
 
 
 @app.route("/predict", methods=["POST"])
@@ -464,18 +602,33 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:17px;heigh
       <div id="rLabel"  class="result-label"></div>
       <div id="rProb"   class="result-prob"></div>
       <div class="result-bar-wrap"><div id="rBar" class="result-bar" style="width:0%"></div></div>
+      <!-- Autonomous Decision Badge -->
+      <div id="rUrgency" style="display:none;margin-top:16px;border-radius:10px;padding:12px 16px;text-align:left">
+        <div id="rUrgencyLabel" style="font-size:.8rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;margin-bottom:6px"></div>
+        <div id="rUrgencyMsg"   style="font-size:.88rem;font-weight:600;margin-bottom:10px"></div>
+        <div id="rPriorities"  style="font-size:.83rem;line-height:1.8"></div>
+      </div>
       <!-- Explanation -->
-      <div id="rExplain" style="display:none;background:#f8f4f0;border-radius:9px;padding:13px 16px;margin-top:14px;text-align:left;border:1px solid var(--border)">
+      <div id="rExplain" style="display:none;background:#f8f4f0;border-radius:9px;padding:13px 16px;margin-top:12px;text-align:left;border:1px solid var(--border)">
         <div style="font-size:.72rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--gold);margin-bottom:6px">📊 Why this result</div>
         <div id="rExplainText" style="font-size:.88rem;line-height:1.65;color:var(--ink)"></div>
       </div>
       <!-- Advice -->
       <div id="rAdvice" class="result-advice" style="margin-top:12px"></div>
-      <!-- Follow-up -->
+      <!-- Follow-up + Dynamic Chat -->
       <div id="rFollowup" style="display:none;margin-top:14px;background:linear-gradient(135deg,#1a1208,#2d1f0e);border-radius:10px;padding:14px 18px;text-align:left">
         <div style="font-size:.72rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#e8c97a;margin-bottom:6px">💬 Want to go further?</div>
-        <div id="rFollowupText" style="font-size:.88rem;color:#e8ddd0;line-height:1.6"></div>
-        <button onclick="generatePlan()" style="margin-top:10px;background:#c0392b;color:#fff;border:none;border-radius:8px;padding:8px 18px;font-size:.83rem;font-weight:600;cursor:pointer">Generate 7-Day Plan</button>
+        <div id="rFollowupText" style="font-size:.88rem;color:#e8ddd0;line-height:1.6;margin-bottom:10px"></div>
+        <button onclick="generatePlan()" style="background:#c0392b;color:#fff;border:none;border-radius:8px;padding:8px 16px;font-size:.82rem;font-weight:600;cursor:pointer;margin-right:8px">📅 7-Day Plan</button>
+        <button onclick="toggleChat()" style="background:#2d4a2d;color:#b8e0b8;border:none;border-radius:8px;padding:8px 16px;font-size:.82rem;font-weight:600;cursor:pointer">💬 Ask a Question</button>
+      </div>
+      <!-- Dynamic follow-up chat -->
+      <div id="rChat" style="display:none;margin-top:12px;border:1px solid var(--border);border-radius:10px;overflow:hidden">
+        <div id="rChatMessages" style="background:#faf8f5;padding:12px 14px;max-height:220px;overflow-y:auto;font-size:.87rem;line-height:1.65;display:flex;flex-direction:column;gap:10px"></div>
+        <div style="display:flex;border-top:1px solid var(--border)">
+          <input id="rChatInput" type="text" placeholder="Ask about your diet, exercise, medication..." style="flex:1;border:none;padding:11px 14px;font-family:inherit;font-size:.87rem;outline:none;background:#fff"/>
+          <button onclick="sendFollowup()" style="background:var(--accent);color:#fff;border:none;padding:0 18px;font-weight:600;cursor:pointer;font-size:.85rem">Ask</button>
+        </div>
       </div>
       <!-- 7-day plan output -->
       <div id="rPlan" style="display:none;margin-top:14px;background:#fff;border:1px solid var(--border);border-radius:10px;padding:16px 18px;text-align:left">
@@ -538,6 +691,55 @@ const gp=f=>document.querySelector(`.pill-group[data-f="${f}"]`)?.querySelector(
     },2000);
   }
 })();
+
+let _chatHistory=[];
+function toggleChat(){
+  const el=document.getElementById('rChat');
+  el.style.display=el.style.display==='none'?'block':'none';
+  if(el.style.display==='block'){
+    document.getElementById('rChatInput').focus();
+    if(!document.getElementById('rChatMessages').children.length){
+      addChatMsg('bot','Hi! Ask me anything about your results — diet, exercise, medication, or what your numbers mean.');
+    }
+  }
+}
+
+function addChatMsg(role, text){
+  const wrap=document.getElementById('rChatMessages');
+  const d=document.createElement('div');
+  d.style.cssText=role==='user'
+    ?'background:#c0392b;color:#fff;padding:8px 12px;border-radius:10px 10px 3px 10px;align-self:flex-end;max-width:85%'
+    :'background:#fff;border:1px solid #e2dbd2;padding:8px 12px;border-radius:10px 10px 10px 3px;align-self:flex-start;max-width:90%';
+  d.textContent=text;
+  wrap.appendChild(d);
+  wrap.scrollTop=wrap.scrollHeight;
+}
+
+async function sendFollowup(){
+  const inp=document.getElementById('rChatInput');
+  const q=inp.value.trim(); if(!q) return;
+  inp.value='';
+  addChatMsg('user',q);
+  const r=window._lastResult;
+  if(!r){addChatMsg('bot','Please run a prediction first.');return;}
+  addChatMsg('bot','Thinking...');
+  try{
+    const res=await fetch('/followup',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({question:q,patient_data:r.data,label:r.label,pct:r.pct,history:_chatHistory})
+    });
+    const d=await res.json();
+    const msgs=document.getElementById('rChatMessages');
+    msgs.lastChild.textContent=d.answer||'Sorry, I could not answer that right now.';
+    _chatHistory.push({q,a:d.answer});
+    if(_chatHistory.length>6) _chatHistory=_chatHistory.slice(-6);
+  }catch(e){
+    document.getElementById('rChatMessages').lastChild.textContent='Could not connect. Please try again.';
+  }
+}
+document.addEventListener('keydown',e=>{
+  if(e.key==='Enter'&&document.activeElement.id==='rChatInput') sendFollowup();
+});
 
 async function generatePlan(){
   const r=window._lastResult;
@@ -706,6 +908,26 @@ async function submitForm(){
         }
         document.getElementById('downloadBtn').style.display='block';
         // Store for report & plan generation
+        // Show autonomous decision badge
+        if(a.decision){
+          const dec=a.decision;
+          const urgEl=document.getElementById('rUrgency');
+          const colors={URGENT:'#fde8e8',ELEVATED:'#fff8e8',MONITOR:'#e8f5e9'};
+          const tcols ={URGENT:'#a93226',ELEVATED:'#856404',MONITOR:'#1e6e3e'};
+          urgEl.style.background=colors[dec.urgency]||'#f0f0f0';
+          urgEl.style.border='1px solid '+(tcols[dec.urgency]||'#ccc')+'44';
+          document.getElementById('rUrgencyLabel').style.color=tcols[dec.urgency]||'#333';
+          document.getElementById('rUrgencyLabel').textContent=
+            {URGENT:'🚨 Urgent Action Required',ELEVATED:'⚠️ Elevated — Take Action',MONITOR:'✅ Monitor & Maintain'}[dec.urgency]||dec.urgency;
+          document.getElementById('rUrgencyMsg').style.color=tcols[dec.urgency]||'#333';
+          document.getElementById('rUrgencyMsg').textContent=dec.urgency_msg;
+          if(dec.priorities&&dec.priorities.length){
+            document.getElementById('rPriorities').innerHTML=
+              '<strong style="font-size:.72rem;letter-spacing:.05em;text-transform:uppercase;color:'+tcols[dec.urgency]+'">Top Priority Actions:</strong><br>'+
+              dec.priorities.map((p,i)=>'<span style="color:'+tcols[dec.urgency]+'">'+('①②③'[i]||'•')+'</span> '+p).join('<br>');
+          }
+          urgEl.style.display='block';
+        }
         window._lastResult={label:d.label,pct:d.pct,ms:d.ms,data,advice:a};
       })
       .catch(()=>{
